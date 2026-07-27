@@ -1,29 +1,40 @@
-# Android ndr-ffi provenance
+# Android NDR FFI provenance
 
-Vendored artifacts:
+The Android bindings are generated from the pinned `vendor/iris-chat-rs`
+submodule rather than from checked-in native libraries.
 
-- `app/src/main/java/uniffi/ndr_ffi/ndr_ffi.kt`
-- `app/src/main/jniLibs/arm64-v8a/libndr_ffi.so`
-- `app/src/main/jniLibs/armeabi-v7a/libndr_ffi.so`
-- `app/src/main/jniLibs/x86/libndr_ffi.so`
-- `app/src/main/jniLibs/x86_64/libndr_ffi.so`
+- Source repository: `https://github.com/irislib/iris-chat-rs.git`
+- Source ref: `codex/bitchat-ffi-hardening`
+- Source commit: `095e70489345df4d92dded686902f3dccb54cc45`
+- Upstream base: `33f7732bbd300ed62fdf5bcf9da0a176efa7ff8c`
+- Crate: `protocol-ffi` (`iris-chat-protocol-ffi`, library `ndr_ffi`)
+- Protocol FFI version: `0.1.0`
+- `nostr-double-ratchet`: `0.0.164` (locked by `protocol-ffi/Cargo.lock`)
+- `nostr-double-ratchet-pairwise-codec`: `0.0.164` (locked by
+  `protocol-ffi/Cargo.lock`)
+- Rust toolchain: `1.95.0`
+- `cargo-ndk`: `4.1.2`
+- Android NDK: `28.2.13676358`
 
-Source:
+Run `app/src/main/ndr-ffi/build-android.sh` after initializing submodules. The
+script uses Cargo's checked-in lockfiles, builds all four Android ABIs, and
+regenerates `app/src/main/java/uniffi/ndr_ffi/ndr_ffi.kt` with UniFFI's
+Android cleaner configuration.
 
-- Repository: `https://github.com/mmalmi/nostr-double-ratchet.git`
-- Crate: `rust/crates/ndr-ffi`
-- Version: `v0.0.124`
-- Source revision: `v0.0.100-37-g3555991`
-- Commit: `35559918bda142793b8ec9de0fd6a5deb460da24`
-- Android build script: `scripts/mobile/build-android.sh`
-- Android NDK used for the vendored refresh: `28.2.13676358`
-- Release builds strip non-runtime symbol tables with the NDK `llvm-strip --strip-unneeded` tool.
+The generated `libndr_ffi.so` files are intentionally ignored. CI and release
+jobs build them from the pinned source before Gradle runs.
 
-Refresh procedure:
+## Rollout sequencing
 
-1. From the source repository, check out the recorded commit.
-2. Run `ANDROID_NDK_HOME=/path/to/android-ndk NDK_HOME=/path/to/android-ndk scripts/mobile/build-android.sh --release`.
-3. Copy `rust/target/android/jniLibs/*/libndr_ffi.so` into this module's `app/src/main/jniLibs/`.
-4. Copy the generated Kotlin binding from `rust/target/android/bindings/` into `app/src/main/java/uniffi/ndr_ffi/ndr_ffi.kt`.
+This source refresh does not implement or claim completion of the separate
+private-envelope kind-1402 migration. Double-ratchet rollout remains on hold
+until that protocol change has its own linked, reviewed Android implementation.
 
-Recorded on `2026-04-29T23:10:01Z`.
+`BuildConfig.NDR_ROLLOUT_ENABLED` is therefore hard-coded to `false`.
+Production builds do not advertise capability bit 11, configure or bootstrap
+the FFI runtime, accept inbound NDR traffic, or send NDR relay/OOB traffic.
+Account messages continue to use the existing Nostr gift-wrap path. Unit tests
+use a debug-only override to exercise the dark implementation. Enabling the
+gate requires the kind-1402 work to be linked and reviewed first; once enabled,
+OOB payload type `0x22` is additionally restricted to an authenticated Noise
+session with a mutual favorite that proves capability bit 11.

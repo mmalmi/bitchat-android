@@ -8,11 +8,13 @@ import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.os.ParcelUuid
 import android.util.Log
+import com.bitchat.android.protocol.BitchatPacket
 import com.bitchat.android.util.AppConstants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Manages GATT server operations, advertising, and server-side connections
@@ -29,6 +31,9 @@ class BluetoothGattServerManager(
     
     companion object {
         private const val TAG = "BluetoothGattServerManager"
+        // Self-healing advertising recovery tuning
+        private const val ADVERTISE_RETRY_BASE_MS = 3_000L      // base backoff for transient advertise failures
+        private const val ADVERTISE_MAX_RETRY_DELAY_MS = 30_000L // cap on backoff delay
     }
     
     // Core Bluetooth components
@@ -39,12 +44,26 @@ class BluetoothGattServerManager(
     
     // GATT server for peripheral mode
     private var gattServer: BluetoothGattServer? = null
+    private val serverLinkIDs = ConcurrentHashMap<String, String>()
     private var characteristic: BluetoothGattCharacteristic? = null
     private var advertiseCallback: AdvertiseCallback? = null
+    private var advertiseRetryCount = 0
     
     // State management
     private var isActive = false
-    private val writeAccumulator = BleWriteAccumulator()
+
+    private fun isBleTransportEnabled(): Boolean {
+        return try {
+            com.bitchat.android.ui.debug.DebugSettingsManager.getInstance().bleEnabled.value
+        } catch (_: Exception) {
+            try { com.bitchat.android.ui.debug.DebugPreferenceManager.getBleEnabled(true) } catch (_: Exception) { true }
+        }
+    }
+
+    private fun isServerRoleEnabled(): Boolean {
+        return isBleTransportEnabled() &&
+            (try { com.bitchat.android.ui.debug.DebugSettingsManager.getInstance().gattServerEnabled.value } catch (_: Exception) { true })
+    }
 
     /**
      * Disconnect a specific device (used by ConnectionManager to enforce overall limits)
@@ -62,15 +81,12 @@ class BluetoothGattServerManager(
      */
     fun start(): Boolean {
         // Respect debug setting
-        try {
-            if (!com.bitchat.android.ui.debug.DebugSettingsManager.getInstance().gattServerEnabled.value) {
-                Log.i(TAG, "Server start skipped: GATT Server disabled in debug settings")
-                return false
-            }
-        } catch (_: Exception) { }
+        if (!isServerRoleEnabled()) {
+            Log.i(TAG, "Server start skipped: BLE/GATT Server disabled in debug settings")
+            return false
+        }
 
         if (isActive) {
-            Log.d(TAG, "GATT server already active; start is a no-op")
             return true
         }
         if (!permissionManager.hasBluetoothPermissions()) {
@@ -109,8 +125,7 @@ class BluetoothGattServerManager(
             // Ensure server is closed if present
             gattServer?.close()
             gattServer = null
-            writeAccumulator.clearAll()
-            Log.i(TAG, "GATT server stopped (already inactive)")
+            serverLinkIDs.clear()
             return
         }
 
@@ -131,7 +146,7 @@ class BluetoothGattServerManager(
             // Close GATT server
             gattServer?.close()
             gattServer = null
-            writeAccumulator.clearAll()
+            serverLinkIDs.clear()
             
             Log.i(TAG, "GATT server stopped")
         }
@@ -158,13 +173,14 @@ class BluetoothGattServerManager(
             override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
                 // Guard against callbacks after service shutdown
                 if (!isActive) {
-                    Log.d(TAG, "Server: Ignoring connection state change after shutdown")
                     return
                 }
-                
+
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
-                        Log.i(TAG, "Server: Device connected ${device.address}")
+                        Log.i(TAG, "Connected to ${device.address} (server)")
+                        val linkID = UUID.randomUUID().toString()
+                        serverLinkIDs[device.address] = linkID
                         
                         // Get best available RSSI (scan RSSI for server connections)
                         val rssi = connectionTracker.getBestRSSI(device.address) ?: Int.MIN_VALUE
@@ -172,7 +188,8 @@ class BluetoothGattServerManager(
                         val deviceConn = BluetoothConnectionTracker.DeviceConnection(
                             device = device,
                             rssi = rssi,
-                            isClient = false
+                            isClient = false,
+                            linkID = linkID
                         )
                         connectionTracker.addDeviceConnection(device.address, deviceConn)
 
@@ -184,11 +201,13 @@ class BluetoothGattServerManager(
                         }
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                        Log.i(TAG, "Server: Device disconnected ${device.address}")
-                        writeAccumulator.clear(device.address)
-                        connectionTracker.cleanupDeviceConnection(device.address)
+                        Log.i(TAG, "Disconnected from ${device.address} (server)")
+                        val linkID = serverLinkIDs.remove(device.address)
+                        if (linkID != null) {
+                            connectionTracker.cleanupDeviceConnectionIfCurrent(device.address, linkID)
+                        }
                         // Notify delegate about device disconnection so higher layers can update direct flags
-                        delegate?.onDeviceDisconnected(device)
+                        delegate?.onDeviceDisconnected(device, linkID)
                     }
                 }
             }
@@ -196,13 +215,10 @@ class BluetoothGattServerManager(
             override fun onServiceAdded(status: Int, service: BluetoothGattService) {
                 // Guard against callbacks after service shutdown
                 if (!isActive) {
-                    Log.d(TAG, "Server: Ignoring service added callback after shutdown")
                     return
                 }
-                
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "Server: Service added successfully: ${service.uuid}")
-                } else {
+
+                if (status != BluetoothGatt.GATT_SUCCESS) {
                     Log.e(TAG, "Server: Failed to add service: ${service.uuid}, status: $status")
                 }
             }
@@ -218,25 +234,30 @@ class BluetoothGattServerManager(
             ) {
                 // Guard against callbacks after service shutdown
                 if (!isActive) {
-                    Log.d(TAG, "Server: Ignoring characteristic write after shutdown")
                     return
                 }
-                
+
                 if (characteristic.uuid == AppConstants.Mesh.Gatt.CHARACTERISTIC_UUID) {
-                    Log.i(
-                        TAG,
-                        "Server: Received write from ${device.address}, size=${value.size} bytes offset=$offset prepared=$preparedWrite"
-                    )
-                    val packet = writeAccumulator.append(device.address, offset, value)
+                    val linkID = serverLinkIDs[device.address]
+                    if (linkID == null) {
+                        Log.d(TAG, "Server: Dropping packet from stale connection ${device.address}")
+                        if (responseNeeded) {
+                            gattServer?.sendResponse(
+                                device,
+                                requestId,
+                                BluetoothGatt.GATT_FAILURE,
+                                0,
+                                null
+                            )
+                        }
+                        return
+                    }
+                    val packet = BitchatPacket.fromBinaryData(value)
                     if (packet != null) {
                         val peerID = packet.senderID.take(8).toByteArray().joinToString("") { "%02x".format(it) }
-                        Log.d(TAG, "Server: Parsed packet type ${packet.type} from $peerID")
-                        delegate?.onPacketReceived(packet, peerID, device)
+                        delegate?.onPacketReceived(packet, peerID, device, linkID)
                     } else {
-                        Log.d(
-                            TAG,
-                            "Server: Buffered partial write from ${device.address}, size=${value.size} bytes offset=$offset"
-                        )
+                        Log.d(TAG, "Server: Failed to parse packet from ${device.address}, size: ${value.size} bytes")
                     }
                     
                     if (responseNeeded) {
@@ -256,14 +277,12 @@ class BluetoothGattServerManager(
             ) {
                 // Guard against callbacks after service shutdown
                 if (!isActive) {
-                    Log.d(TAG, "Server: Ignoring descriptor write after shutdown")
                     return
                 }
-                
+
                 if (BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE.contentEquals(value)) {
                     connectionTracker.addSubscribedDevice(device)
 
-                    Log.d(TAG, "Server: Connection setup complete for ${device.address}")
                     connectionScope.launch {
                         delay(100)
                         if (isActive) { // Check if still active
@@ -276,42 +295,21 @@ class BluetoothGattServerManager(
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 }
             }
-
-            override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
-                if (!isActive) {
-                    Log.d(TAG, "Server: Ignoring MTU update after shutdown")
-                    return
-                }
-
-                Log.i(TAG, "Server: MTU changed for ${device.address} to $mtu")
-                connectionTracker.updateDeviceMtu(device.address, mtu)
-            }
-
-            override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-                connectionTracker.completeNotificationAck(device.address, status)
-                if (!isActive) {
-                    Log.d(TAG, "Server: Notification callback after shutdown for ${device.address} status=$status")
-                    return
-                }
-                Log.d(TAG, "Server: Notification delivered to ${device.address} with status $status")
-            }
         }
         
         // Proper cleanup sequencing to prevent race conditions
         gattServer?.let { server ->
-            Log.d(TAG, "Cleaning up existing GATT server")
             try {
                 server.close()
             } catch (e: Exception) {
                 Log.w(TAG, "Error closing existing GATT server: ${e.message}")
             }
         }
-        
+
         // Small delay to ensure cleanup is complete
         Thread.sleep(100)
-        
+
         if (!isActive) {
-            Log.d(TAG, "Service inactive, skipping GATT server creation")
             return
         }
         
@@ -349,7 +347,7 @@ class BluetoothGattServerManager(
     @Suppress("DEPRECATION")
     private fun startAdvertising() {
         // Respect debug setting
-        val enabled = try { com.bitchat.android.ui.debug.DebugSettingsManager.getInstance().gattServerEnabled.value } catch (_: Exception) { true }
+        val enabled = isServerRoleEnabled()
 
         // Guard conditions – never throw here to avoid crashing the app from a background coroutine
         if (!permissionManager.hasBluetoothPermissions()) {
@@ -361,11 +359,10 @@ class BluetoothGattServerManager(
             return
         }
         if (!isActive) {
-            Log.d(TAG, "Not starting advertising: manager not active")
             return
         }
         if (!enabled) {
-            Log.i(TAG, "Not starting advertising: GATT Server disabled via debug settings")
+            Log.d(TAG, "Not starting advertising: GATT Server disabled via debug settings")
             return
         }
         if (bleAdvertiser == null) {
@@ -401,14 +398,31 @@ class BluetoothGattServerManager(
         
         advertiseCallback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                advertiseRetryCount = 0
                 val mode = try {
                     powerManager.getPowerInfo().split("Current Mode: ")[1].split("\n")[0]
                 } catch (_: Exception) { "unknown" }
-                Log.i(TAG, "Advertising started (power mode: $mode) with stable ID: ${peerIDBytes.joinToString("") { "%02x".format(it) }}")
+                Log.i(TAG, "Advertising started (power mode: $mode)")
             }
-            
+
             override fun onStartFailure(errorCode: Int) {
                 Log.e(TAG, "Advertising failed: $errorCode")
+                // Previously this only logged, so if advertising failed this device became
+                // undiscoverable until a manual BLE toggle. Retry transient failures with backoff.
+                when (errorCode) {
+                    ADVERTISE_FAILED_ALREADY_STARTED -> Unit // already advertising, no retry
+                    ADVERTISE_FAILED_DATA_TOO_LARGE -> Unit // config issue, not retrying
+                    ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> Unit // unsupported, not retrying
+                    ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> {
+                        scheduleAdvertiseRestart("too-many-advertisers")
+                    }
+                    ADVERTISE_FAILED_INTERNAL_ERROR -> {
+                        scheduleAdvertiseRestart("internal-error")
+                    }
+                    else -> {
+                        scheduleAdvertiseRestart("unknown-$errorCode")
+                    }
+                }
             }
         }
         
@@ -435,11 +449,28 @@ class BluetoothGattServerManager(
     }
     
     /**
+     * Schedule an advertising restart with incremental backoff after a transient failure.
+     */
+    private fun scheduleAdvertiseRestart(reason: String) {
+        advertiseRetryCount++
+        val delayMs = (ADVERTISE_RETRY_BASE_MS * advertiseRetryCount).coerceAtMost(ADVERTISE_MAX_RETRY_DELAY_MS)
+        Log.w(TAG, "Scheduling advertising restart in ${delayMs}ms (attempt $advertiseRetryCount, reason=$reason)")
+        connectionScope.launch {
+            delay(delayMs)
+            if (isActive && isServerRoleEnabled()) {
+                stopAdvertising()
+                delay(100)
+                startAdvertising()
+            }
+        }
+    }
+
+    /**
      * Restart advertising (for power mode changes)
      */
     fun restartAdvertising() {
         // Respect debug setting
-        val enabled = try { com.bitchat.android.ui.debug.DebugSettingsManager.getInstance().gattServerEnabled.value } catch (_: Exception) { true }
+        val enabled = isServerRoleEnabled()
         if (!isActive || !enabled) {
             stopAdvertising()
             return
