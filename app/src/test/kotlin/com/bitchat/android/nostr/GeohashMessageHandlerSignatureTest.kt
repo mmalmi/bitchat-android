@@ -5,11 +5,14 @@ import androidx.test.core.app.ApplicationProvider
 import com.bitchat.android.ui.ChatState
 import com.bitchat.android.ui.DataManager
 import com.bitchat.android.ui.MessageManager
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -33,11 +36,15 @@ class GeohashMessageHandlerSignatureTest {
     private lateinit var messageManager: MessageManager
     private lateinit var repo: GeohashRepository
     private lateinit var handler: GeohashMessageHandler
+    private lateinit var accountEpoch: NostrAccountEpoch
 
     private val geohash = "u4pruy"
 
     @Before
     fun setup() {
+        accountEpoch = NostrInboundAccountLifecycle.begin(
+            "aa".repeat(32), testScope.coroutineContext[Job]
+        ).epoch
         chatState = ChatState(scope = testScope)
         dataManager = DataManager(context = application)
         messageManager = MessageManager(state = chatState)
@@ -45,11 +52,15 @@ class GeohashMessageHandlerSignatureTest {
         handler = GeohashMessageHandler(
             application = application,
             repo = repo,
-            scope = testScope,
             dataManager = dataManager,
             addChannelMessage = messageManager::addChannelMessage,
             signatureVerificationDispatcher = testDispatcher
         )
+    }
+
+    @After
+    fun tearDown() {
+        NostrInboundAccountLifecycle.invalidate()
     }
 
     private fun buildSignedEvent(identity: NostrIdentity, content: String): NostrEvent {
@@ -64,11 +75,11 @@ class GeohashMessageHandlerSignatureTest {
     }
 
     @Test
-    fun onEvent_acceptsGenuinelySignedEvent() {
+    fun onEvent_acceptsGenuinelySignedEvent() = runBlocking {
         val victim = NostrIdentity.generate()
         val genuine = buildSignedEvent(victim, "hello from the real victim")
 
-        handler.onEvent(genuine, geohash)
+        handler.onEvent(genuine, geohash, accountEpoch)?.join()
 
         val stored = chatState.getChannelMessagesValue()["geo:$geohash"]
         assertEquals(1, stored?.size)
@@ -76,7 +87,7 @@ class GeohashMessageHandlerSignatureTest {
     }
 
     @Test
-    fun onEvent_rejectsEventWithForgedSignature() {
+    fun onEvent_rejectsEventWithForgedSignature() = runBlocking {
         val victim = NostrIdentity.generate()
         val attacker = NostrIdentity.generate()
 
@@ -94,14 +105,14 @@ class GeohashMessageHandlerSignatureTest {
         // Sanity check: this event is indeed invalid before we even touch the handler.
         assertEquals(false, forged.isValidSignature())
 
-        handler.onEvent(forged, geohash)
+        handler.onEvent(forged, geohash, accountEpoch)?.join()
 
         val stored = chatState.getChannelMessagesValue()["geo:$geohash"]
         assertNull("Forged event must not be rendered as a legitimate message", stored)
     }
 
     @Test
-    fun onEvent_stillAcceptsGenuineEventAfterForgedCopyWithSameIdWasRejected() {
+    fun onEvent_stillAcceptsGenuineEventAfterForgedCopyWithSameIdWasRejected() = runBlocking {
         val victim = NostrIdentity.generate()
         val attacker = NostrIdentity.generate()
         val genuine = buildSignedEvent(victim, "hello from the real victim")
@@ -122,12 +133,12 @@ class GeohashMessageHandlerSignatureTest {
         assertEquals(false, forgedWithSameId.isValidSignature())
 
         // Forged copy arrives first and must be rejected without poisoning the dedup cache.
-        handler.onEvent(forgedWithSameId, geohash)
+        handler.onEvent(forgedWithSameId, geohash, accountEpoch)?.join()
         assertNull(chatState.getChannelMessagesValue()["geo:$geohash"])
 
         // The genuine copy (same id, valid signature) arrives afterwards from another relay -
         // it must still be rendered, not silently dropped as a "duplicate".
-        handler.onEvent(genuine, geohash)
+        handler.onEvent(genuine, geohash, accountEpoch)?.join()
 
         val stored = chatState.getChannelMessagesValue()["geo:$geohash"]
         assertEquals(1, stored?.size)
