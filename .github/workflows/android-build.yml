@@ -19,14 +19,7 @@ jobs:
           distribution: temurin
           java-version: 21.0.11+10.0.LTS
       - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
-      - name: Verify NDR host tests
-        run: |
-          manifest=app/src/debug/AndroidManifest.xml
-          git show 3c9e8162:app/src/debug/AndroidManifest.xml > "$manifest"
-          trap 'git restore --source=HEAD -- app/src/debug/AndroidManifest.xml' EXIT
-          ./gradlew :app:testDebugUnitTest --tests 'com.bitchat.android.nostr.Ndr*'
-          git restore --source=HEAD -- "$manifest"
-          git diff --exit-code -- "$manifest"
+      # Production JVM tests run independently in the NDR pull request's normal CI.
       - name: Build pinned native runtime
         run: |
           source tools/arti-build/TOOLCHAIN.env
@@ -47,8 +40,3 @@ jobs:
         with:
           name: Ndr-physical-lab-apk
           path: app/build/outputs/apk/debug/*.apk
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: Ndr-host-test-results
-          path: app/build/test-results/
