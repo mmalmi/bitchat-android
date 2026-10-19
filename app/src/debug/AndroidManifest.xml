@@ -14,7 +14,8 @@
         tools:replace="android:name">
         <activity android:name=".MainActivity" android:enabled="false" />
         <service android:name=".service.MeshForegroundService" android:enabled="false" />
-        <receiver android:name=".service.BootCompletedReceiver" android:enabled="false" />
+        <receiver android:name=".service.BootCompletedReceiver" android:enabled="false"
+            tools:replace="android:enabled" />
         <activity android:name="com.bitchat.android.testhook.NdrLabActivity"
             android:exported="true">
             <intent-filter>
