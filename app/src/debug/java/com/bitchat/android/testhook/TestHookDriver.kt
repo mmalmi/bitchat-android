@@ -54,6 +54,9 @@ object TestHookDriver {
     private const val DEFAULT_FILE_TIMEOUT_MS = 180_000L
 
     suspend fun execute(context: Context, cmd: String, intent: Intent): JSONObject {
+        if (cmd.startsWith("ndr_lab_")) {
+            return NdrLabDriver.execute(cmd.removePrefix("ndr_lab_"), intent).put("cmd", cmd)
+        }
         Log.d(TAG, "execute cmd=$cmd")
         val result = when (cmd) {
             "ping" -> ok(cmd).put("pong", true).put("package", context.packageName)

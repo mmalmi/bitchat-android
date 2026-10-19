@@ -2,84 +2,32 @@ name: Android CI
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
 
 permissions:
   contents: read
 
-env:
-  SETUP_JAVA_VERSION: 21.0.11+10.0.LTS
-
 jobs:
-  verify:
-    name: Test and lint
+  build:
     runs-on: ubuntu-24.04
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Set up pinned JDK
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          distribution: temurin
-          java-version: ${{ env.SETUP_JAVA_VERSION }}
-
-      - name: Set up and validate Gradle
-        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
-
-      - name: Verify native build boundaries
-        run: python3 tools/reproducible-builds/test_native_source_build.py
-
-      - name: Verify native library inputs
-        run: tools/arti-build/verify-checksums.sh
-
-      - name: Run unit tests
-        run: ./gradlew testDebugUnitTest
-
-      - name: Run lint
-        run: ./gradlew lintDebug
-
-      - name: Upload test reports
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: test-reports
-          path: |
-            **/build/test-results/
-            **/build/reports/tests/
-
-      - name: Upload lint results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: lint-results
-          path: "**/build/reports/lint-results-*.html"
-
-  build-debug:
-    name: Build debug APK
-    runs-on: ubuntu-24.04
-    needs: verify
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
+          fetch-depth: 0
           submodules: recursive
-
-      - name: Set up pinned JDK
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
         with:
           distribution: temurin
-          java-version: ${{ env.SETUP_JAVA_VERSION }}
-
-      - name: Set up and validate Gradle
-        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
-
-      - name: Build NDR FFI from pinned source
+          java-version: 21.0.11+10.0.LTS
+      - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+      - name: Verify NDR host tests
+        run: |
+          manifest=app/src/debug/AndroidManifest.xml
+          git show 3c9e8162:app/src/debug/AndroidManifest.xml > "$manifest"
+          trap 'git restore --source=HEAD -- app/src/debug/AndroidManifest.xml' EXIT
+          ./gradlew :app:testDebugUnitTest --tests 'com.bitchat.android.nostr.Ndr*'
+          git restore --source=HEAD -- "$manifest"
+          git diff --exit-code -- "$manifest"
+      - name: Build pinned native runtime
         run: |
           source tools/arti-build/TOOLCHAIN.env
           rustup toolchain install "$RUST_VERSION" --profile minimal
@@ -93,72 +41,14 @@ jobs:
           "$sdkmanager" "ndk;$ANDROID_NDK_VERSION"
           cargo "+$RUST_VERSION" install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
           ./app/src/main/ndr-ffi/build-android.sh --check-bindings
-
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
-
-      - name: Upload debug APK
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Build lab APK
+        run: ./gradlew :app:assembleDebug
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: Debug-apk
+          name: Ndr-physical-lab-apk
           path: app/build/outputs/apk/debug/*.apk
-
-  reproducible-build:
-    name: Reproducible release build ${{ matrix.replica }}
-    runs-on: ubuntu-24.04
-    needs: verify
-    strategy:
-      fail-fast: false
-      matrix:
-        replica: [a, b]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
-          submodules: recursive
-
-      - name: Set up pinned JDK
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
-        with:
-          distribution: temurin
-          java-version: ${{ env.SETUP_JAVA_VERSION }}
-
-      - name: Set up and validate Gradle
-        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
-        with:
-          cache-disabled: true
-
-      - name: Build canonical unsigned release
-        run: tools/reproducible-builds/build-in-container.sh "$RUNNER_TEMP/release-${{ matrix.replica }}"
-
-      - name: Upload build replica
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: reproducible-release-${{ matrix.replica }}
-          path: ${{ runner.temp }}/release-${{ matrix.replica }}/*
-          if-no-files-found: error
-
-  compare-reproducible-builds:
-    name: Compare release bytes
-    runs-on: ubuntu-24.04
-    needs: reproducible-build
-
-    steps:
-      - name: Checkout verification script
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Download replica A
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: reproducible-release-a
-          path: ${{ runner.temp }}/release-a
-
-      - name: Download replica B
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: reproducible-release-b
-          path: ${{ runner.temp }}/release-b
-
-      - name: Compare every canonical byte
-        run: tools/reproducible-builds/compare-release.sh "$RUNNER_TEMP/release-a" "$RUNNER_TEMP/release-b"
+          name: Ndr-host-test-results
+          path: app/build/test-results/

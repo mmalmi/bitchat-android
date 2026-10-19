@@ -2,10 +2,26 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" tools:node="remove" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
 
-    <application>
+    <application
+        android:name="com.bitchat.android.testhook.NdrLabApplication"
+        android:networkSecurityConfig="@xml/ndr_lab_network_security"
+        tools:replace="android:name">
+        <activity android:name=".MainActivity" android:enabled="false" />
+        <service android:name=".service.MeshForegroundService" android:enabled="false" />
+        <receiver android:name=".service.BootCompletedReceiver" android:enabled="false" />
+        <activity android:name="com.bitchat.android.testhook.NdrLabActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
         <!-- Debug-only ADB test hook. Drives mesh operations (scan, connect,
              handshake, DMs, files, broadcast, raw packets) from host scripts.
              Exported intentionally so `adb shell am broadcast` can reach it;
