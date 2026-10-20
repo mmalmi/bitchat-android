@@ -1591,7 +1591,6 @@ class ChatViewModel(
                 Log.e(TAG, "Refusing to advance NDR bootstrap after session rebind failed")
                 return
             }
-            ndrInviteRetries.cancel(peerID)
             ndrBootstrapAttemptMs.remove(peerID)
             ndrNoiseHandshakeAttemptMs.remove(peerID)
         }
