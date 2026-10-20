@@ -12,6 +12,10 @@ Enabling rollout requires review and physical cross-client qualification.
   `0x22`. This inner payload type is distinct from the outer public file packet
   type with the same numeric value. The Noise peer's authenticated identity must
   match the intended contact's Nostr binding before accepting the handshake.
+- Either peer may initiate bootstrap. The native runtime converges crossed
+  invitations onto one session. Each started invite finishes its finite retry
+  budget, even if a crossed invite creates a local session first; accepting a
+  repeated invite replays the same native response and bootstrap envelope.
 - Relays carry only signed kind-1060 pairwise messages. They contain no recipient
   `p` tag. Subscription authors are ephemeral ratchet keys, not contact identity
   keys. A new native subscribe action replaces the filter even when its
@@ -32,8 +36,9 @@ bounded-backoff retries do not require another message to arrive.
 
 Invites retain a finite retry budget after a successful local Noise handoff:
 the peer may still be waiting for its mutual-favorite notification. Retries
-reuse the same invite while no local pairwise session exists, and recheck the
-authenticated route and favorite binding before every attempt.
+reuse the same invite and recheck the authenticated route and favorite binding
+before every attempt. A local session alone does not prove the remote peer
+received the response, so it does not cancel an already-started retry chain.
 
 An established contact keeps a durable NDR-required binding. Disabling the
 rollout gate, losing native state, restarting, or removing a favorite must not
