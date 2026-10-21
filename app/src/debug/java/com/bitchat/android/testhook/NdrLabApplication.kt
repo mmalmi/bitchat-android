@@ -56,6 +56,8 @@ class NdrLabApplication : Application() {
             .build()
         field<AtomicReference<OkHttpClient?>>(OkHttpProvider, "wsClientRef")
             .set(localClient)
+        field<AtomicReference<OkHttpClient?>>(OkHttpProvider, "privateWsClientRef")
+            .set(localClient)
         field<AtomicReference<OkHttpProvider.RoutedClient?>>(OkHttpProvider, "httpClientRef")
             .set(OkHttpProvider.RoutedClient(localClient, OkHttpProvider.Route.DIRECT))
 
