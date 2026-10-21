@@ -25,7 +25,7 @@ jobs:
           # JVM tests use the production application; the APK uses the lab application.
           git show 3c9e8162:app/src/debug/AndroidManifest.xml > "$manifest"
           trap 'git restore --source=HEAD -- app/src/debug/AndroidManifest.xml' EXIT
-          ./gradlew :app:testDebugUnitTest --tests 'com.bitchat.android.nostr.NdrInviteRetryCoordinatorTest' --tests 'com.bitchat.android.nostr.NdrBootstrapDeciderTest'
+          ./gradlew :app:testDebugUnitTest --tests 'com.bitchat.android.nostr.Ndr*' --tests 'com.bitchat.android.nostr.NostrRelaySubscriptionRaceTest' --tests 'com.bitchat.android.nostr.NdrBootstrapDeciderTest'
           git restore --source=HEAD -- "$manifest"
           git diff --exit-code -- "$manifest"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
